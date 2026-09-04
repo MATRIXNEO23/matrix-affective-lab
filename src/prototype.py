@@ -68,7 +68,9 @@ class MatrixAffectivePrototype:
                 emotion = "joy" if s.confirmed else "hope"
             else:
                 emotion = "distress" if s.confirmed else "fear"
-            impulses.append(EmotionalImpulse(emotion, intensity, s.id, s.actor_id or s.target_id))
+            impulses.append(EmotionalImpulse(
+                emotion, intensity, s.id, s.actor_id or s.target_id, "goal"
+            ))
 
         if s.category == "action" and s.actor_id and s.standard_compliance is not None:
             compliance = max(-1.0, min(1.0, s.standard_compliance))
@@ -79,7 +81,11 @@ class MatrixAffectivePrototype:
                 else:
                     emotion = "shame" if is_self else "reproach"
                 impulses.append(EmotionalImpulse(
-                    emotion, abs(compliance), s.id, None if is_self else s.actor_id
+                    emotion,
+                    abs(compliance),
+                    s.id,
+                    None if is_self else s.actor_id,
+                    "standard",
                 ))
 
         target = s.target_id or s.actor_id
@@ -88,7 +94,11 @@ class MatrixAffectivePrototype:
             intensity = abs(valence) * self._clamp(s.attitude_intensity)
             if intensity > 0.0:
                 impulses.append(EmotionalImpulse(
-                    "liking" if valence > 0 else "disliking", intensity, s.id, target
+                    "liking" if valence > 0 else "disliking",
+                    intensity,
+                    s.id,
+                    target,
+                    "attitude",
                 ))
 
         return AppraisalResult(

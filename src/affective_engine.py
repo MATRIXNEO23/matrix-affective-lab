@@ -26,10 +26,7 @@ class EmotionalImpulse:
 
 @dataclass
 class EmotionDisposition:
-    # Matrix normalized equivalent of FAtiMA threshold.
     threshold: float = 0.05
-    # Effective half-life exposed for Matrix configuration. Internally it is
-    # converted to FAtiMA's Decay multiplier over a 15-tick base half-life.
     half_life: float = 15.0
 
 
@@ -40,18 +37,21 @@ class AffectiveProfile:
     negative_reactivity: float = 1.0
     recovery_scale: float = 1.0
     persistent_step: float = 0.05
+    # Cognitiv-compatible appraisal knob retained for the prototype adapter.
+    mood_bias_strength: float = 0.15
+    # Optional override; None keeps the FAtiMA default from AffectiveConfig.
+    mood_half_life: Optional[float] = None
 
 
 @dataclass(frozen=True)
 class AffectiveConfig:
-    # Exact FAtiMA defaults, normalized where needed.
     half_life_decay_constant: float = 0.5
     emotion_influence_on_mood_factor: float = 0.3
     mood_influence_on_emotion_factor: float = 0.3
-    minimum_mood_for_influence: float = 0.05  # FAtiMA 0.5 on [-10,10]
+    minimum_mood_for_influence: float = 0.05
     emotional_half_life_decay_time: float = 15.0
     mood_half_life_decay_time: float = 60.0
-    extinction_threshold: float = 0.01  # FAtiMA 0.1 on [0,10]
+    extinction_threshold: float = 0.01
 
 
 @dataclass
@@ -83,10 +83,10 @@ class _Contribution:
     tick_t0: float
     threshold: float
     decay_multiplier: float
+    source_potential: float
 
     @property
     def potential(self) -> float:
-        # FAtiMA ActiveEmotion.Potential = Intensity + Threshold.
         return self.intensity_at_t0 + self.threshold
 
 
@@ -122,7 +122,6 @@ class AffectiveEngine:
         self.persistent_affect: Dict[str, PersistentAffect] = {}
         self._contributions: Dict[tuple[str, str, Optional[str]], _Contribution] = {}
         self._time = 0.0
-        # FAtiMA Mood stores a t0 intensity and t0 tick for exact exponential decay.
         self._mood_at_t0 = 0.0
         self._mood_tick_t0 = 0.0
 
@@ -138,21 +137,21 @@ class AffectiveEngine:
         return (c.emotion_type, self._decayed_contribution(c, self._time))
 
     def apply_impulse(self, impulse: EmotionalImpulse) -> bool:
-        """FAtiMA-style AddEmotion adapted to Matrix's stable appraisal slot.
-
-        The same cause/channel/target is a reappraisal: the previous active
-        contribution is replaced. FAtiMA does not update mood on reappraisal.
-        Matrix additionally reverses/reapplies persistent-affect deltas.
-        """
         slot = (impulse.cause_id, impulse.appraisal_channel, impulse.target_id)
         previous = self._contributions.get(slot)
-        reappraisal = previous is not None
-
         raw_potential = self._profiled_intensity(impulse.emotion_type, impulse.intensity)
-        potential = self._determine_potential(impulse.emotion_type, raw_potential)
-        disp = self.disposition(impulse.emotion_type)
-        threshold = self._clamp(disp.threshold)
 
+        # Matrix semantic adapter: replaying the identical validated appraisal is
+        # idempotent. FAtiMA assumes a new appraisal call carries new evidence;
+        # our event bus can legitimately deliver the same event more than once.
+        if (
+            previous is not None
+            and previous.emotion_type == impulse.emotion_type
+            and math.isclose(previous.source_potential, raw_potential, abs_tol=1e-12)
+        ):
+            return False
+
+        old_intensity = 0.0
         if previous is not None:
             old_intensity = self._decayed_contribution(previous, self._time)
             del self._contributions[slot]
@@ -162,24 +161,35 @@ class AffectiveEngine:
                     impulse.target_id, previous.emotion_type, -old_intensity
                 )
 
-        # FAtiMA creates ActiveEmotion only when potential > threshold.
+        disp = self.disposition(impulse.emotion_type)
+        threshold = self._clamp(disp.threshold)
+
+        # Matrix semantic adapter: explicit zero/below-threshold source evidence
+        # extinguishes a prior appraisal. Mood may modulate a real appraisal but
+        # cannot manufacture one from semantically absent evidence.
+        if raw_potential <= threshold:
+            self._update_dimensions()
+            return previous is not None
+
+        potential = self._determine_potential(impulse.emotion_type, raw_potential)
         if potential <= threshold:
             self._update_dimensions()
-            return reappraisal
+            return previous is not None
 
         intensity = self._clamp(potential - threshold)
-        decay_multiplier = self._fatima_decay_multiplier(disp)
         new = _Contribution(
             emotion_type=impulse.emotion_type,
             intensity_at_t0=intensity,
             tick_t0=self._time,
             threshold=threshold,
-            decay_multiplier=decay_multiplier,
+            decay_multiplier=self._fatima_decay_multiplier(disp),
+            source_potential=raw_potential,
         )
         self._contributions[slot] = new
         self._recompute_emotion(new.emotion_type)
 
-        if not reappraisal and self._influences_mood(new.emotion_type):
+        # Direct FAtiMA behavior: a reappraisal does not push mood again.
+        if previous is None and self._influences_mood(new.emotion_type):
             self._update_mood_from_new_emotion(new.emotion_type, intensity)
 
         if impulse.target_id:
@@ -210,13 +220,6 @@ class AffectiveEngine:
         self._update_dimensions()
 
     def reinforce(self, cause_id: str, appraisal_channel: str, target_id: Optional[str], potential: float) -> bool:
-        """Direct port of FAtiMA ActiveEmotion.ReforceEmotion, normalized.
-
-        Uses log-sum-exp on active potential. This is intentionally exposed as
-        a separate operation because FAtiMA itself does not call it from
-        AddEmotion; Matrix can use it only when reinforcement is semantically
-        justified by Reflection/Memory later.
-        """
         slot = (cause_id, appraisal_channel, target_id)
         c = self._contributions.get(slot)
         if c is None:
@@ -224,24 +227,25 @@ class AffectiveEngine:
         current_intensity = self._decayed_contribution(c, self._time)
         current_potential = current_intensity + c.threshold
         p = self._clamp(potential)
-        # FAtiMA operates on [0,10]. Scale to that domain, apply exact formula,
-        # then normalize back to [0,1].
         a = current_potential * 10.0
         b = p * 10.0
-        reinforced_internal = max(a, b) + math.log(math.exp(a - max(a, b)) + math.exp(b - max(a, b)))
+        pivot = max(a, b)
+        reinforced_internal = pivot + math.log(math.exp(a - pivot) + math.exp(b - pivot))
         reinforced = min(1.0, reinforced_internal / 10.0)
         new_intensity = self._clamp(reinforced - c.threshold)
         self._contributions[slot] = _Contribution(
-            c.emotion_type, new_intensity, self._time, c.threshold, c.decay_multiplier
+            c.emotion_type,
+            new_intensity,
+            self._time,
+            c.threshold,
+            c.decay_multiplier,
+            max(c.source_potential, p),
         )
         self._recompute_emotion(c.emotion_type)
         self._update_dimensions()
         return True
 
     def _fatima_decay_multiplier(self, disp: EmotionDisposition) -> float:
-        # FAtiMA: exp(log(0.5)/15 * Decay * delta).
-        # Exposing half_life keeps Matrix configuration intuitive while mapping
-        # exactly to FAtiMA's Decay multiplier.
         effective_half_life = max(0.01, disp.half_life * max(0.01, self.profile.recovery_scale))
         return self.config.emotional_half_life_decay_time / effective_half_life
 
@@ -253,12 +257,13 @@ class AffectiveEngine:
         return c.intensity_at_t0 * math.exp(lam * c.decay_multiplier * delta)
 
     def _determine_potential(self, emotion_type: str, potential: float) -> float:
-        # Direct normalized equivalent of ConcreteEmotionalState.DeterminePotential.
         valence = self._emotion_valence(emotion_type)
-        adjusted = potential + valence * (
-            self.state.mood_valence * self.config.mood_influence_on_emotion_factor
+        return max(
+            0.0,
+            potential
+            + valence
+            * (self.state.mood_valence * self.config.mood_influence_on_emotion_factor),
         )
-        return max(0.0, adjusted)
 
     def _set_mood(self, value: float) -> None:
         value = max(-1.0, min(1.0, value))
@@ -269,11 +274,10 @@ class AffectiveEngine:
         self._mood_tick_t0 = self._time
 
     def _update_mood_from_new_emotion(self, emotion_type: str, intensity: float) -> None:
-        # Direct normalized equivalent of Mood.UpdateMood.
-        scale = self._emotion_valence(emotion_type)
         self._set_mood(
             self.state.mood_valence
-            + scale * (intensity * self.config.emotion_influence_on_mood_factor)
+            + self._emotion_valence(emotion_type)
+            * (intensity * self.config.emotion_influence_on_mood_factor)
         )
 
     def _decay_mood_to(self, tick: float) -> None:
@@ -281,9 +285,8 @@ class AffectiveEngine:
             self.state.mood_valence = 0.0
             return
         delta = max(0.0, tick - self._mood_tick_t0)
-        lam = math.log(self.config.half_life_decay_constant) / max(
-            0.01, self.config.mood_half_life_decay_time
-        )
+        half_life = self.profile.mood_half_life or self.config.mood_half_life_decay_time
+        lam = math.log(self.config.half_life_decay_constant) / max(0.01, half_life)
         value = self._mood_at_t0 * math.exp(lam * delta)
         if abs(value) < self.config.minimum_mood_for_influence:
             self.state.mood_valence = 0.0
@@ -293,8 +296,6 @@ class AffectiveEngine:
             self.state.mood_valence = value
 
     def _recompute_emotion(self, emotion_type: str) -> None:
-        # Cognitiv source port for integration across independent active causes:
-        # current + impulse * (1-current), equivalently 1-product(1-i).
         vals = [
             self._decayed_contribution(c, self._time)
             for c in self._contributions.values()
@@ -309,7 +310,6 @@ class AffectiveEngine:
         self.state.emotions[emotion_type] = self._clamp(1.0 - remaining)
 
     def _update_dimensions(self) -> None:
-        # Directly adapted from Cognitiv EmotionSystem._update_dimensions.
         emotions = self.state.emotions
         if not emotions:
             self.state.valence = self.state.mood_valence * 0.1
@@ -331,10 +331,8 @@ class AffectiveEngine:
         lo_dom = sum(emotions.get(e, 0.0) for e in self.LOW_DOMINANCE)
         dom_total = hi_dom + lo_dom
         self.state.dominance = 0.5 + 0.5 * (hi_dom - lo_dom) / dom_total if dom_total > 0 else 0.5
-
-        # Keep a slow arousal baseline from Cognitiv without duplicating valence mood.
-        self.state.mood_arousal += (self.state.arousal - self.state.mood_arousal) * 0.01
-        self.state.mood_arousal = self._clamp(self.state.mood_arousal)
+        # Cognitiv updates mood via a separate update_mood(delta_time) call.
+        # Do not mutate mood here: dimensional recomputation must be idempotent.
 
     def _profiled_intensity(self, emotion_type: str, value: float) -> float:
         scale = self.profile.reactivity
@@ -352,7 +350,6 @@ class AffectiveEngine:
         return 0.0
 
     def _influences_mood(self, emotion_type: str) -> bool:
-        # FAtiMA prospect emotions Hope/Fear do not influence mood.
         return emotion_type not in {"hope", "fear"}
 
     @staticmethod
@@ -362,7 +359,6 @@ class AffectiveEngine:
     def _update_persistent_affect(
         self, entity_id: str, emotion_type: str, intensity_delta: float
     ) -> None:
-        # Matrix-owned extension; intentionally kept outside FAtiMA core math.
         if math.isclose(intensity_delta, 0.0, rel_tol=0.0, abs_tol=1e-12):
             return
         affect = self.persistent_affect.setdefault(entity_id, PersistentAffect())

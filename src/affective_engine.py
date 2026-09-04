@@ -24,7 +24,7 @@ class PersistentAffect: trust:float=.5;attachment:float=0.;affection:float=0.;at
 class _Contribution: emotion_type:str;intensity_at_t0:float;tick_t0:float;threshold:float;decay_multiplier:float;source_potential:float
 class AffectiveEngine:
  POSITIVE={"joy","hope","relief","satisfaction","admiration","pride","gratitude","gratification","love","liking","happy-for","gloating","affection"};NEGATIVE={"distress","fear","fears-confirmed","disappointment","anger","reproach","shame","remorse","resentment","hate","disliking","pity","aversion"}
- REPAIR_TRUST={"gratitude","relief","satisfaction","love"};PERSISTENT_EFFECTS={"joy","relief","satisfaction","love","liking","gratitude","happy-for","affection","admiration","pride","gratification","anger","reproach","resentment","disappointment","fears-confirmed","hate","disliking","aversion"}
+ REPAIR_TRUST={"gratitude","relief","satisfaction"};PERSISTENT_EFFECTS={"joy","relief","satisfaction","love","liking","gratitude","happy-for","affection","admiration","pride","gratification","anger","reproach","resentment","disappointment","fears-confirmed","hate","disliking","aversion"}
  ALMA_PAD={"admiration":(.5,.3,-.2),"anger":(-.51,.59,.25),"disliking":(-.4,.2,.1),"disappointment":(-.3,.1,-.4),"distress":(-.4,-.2,-.5),"fear":(-.64,.60,-.43),"fears-confirmed":(-.5,-.3,-.7),"gloating":(.3,-.3,-.1),"gratification":(.6,.5,.4),"gratitude":(.4,.2,-.3),"happy-for":(.4,.2,.2),"hate":(-.6,.6,.3),"hope":(.2,.2,-.1),"joy":(.4,.2,.1),"liking":(.4,.16,-.24),"love":(.3,.1,.2),"pity":(-.4,-.2,-.5),"pride":(.4,.3,.3),"relief":(.2,-.3,.4),"remorse":(-.3,.1,-.6),"reproach":(-.3,-.1,.4),"resentment":(-.2,-.3,-.2),"satisfaction":(.3,-.2,.4),"shame":(-.3,.1,-.6)}
  def __init__(self,dispositions=None,profile=None,config=None):self.state=EmotionState();self.dispositions=dispositions or {};self.profile=profile or AffectiveProfile();self.config=config or AffectiveConfig();self.persistent_affect={};self._contributions={};self._persistent_ledger={};self._time=0.;self._mood_at_t0=0.;self._mood_tick_t0=0.
  def disposition(self,e):return self.dispositions.get(e,EmotionDisposition())
@@ -67,13 +67,15 @@ class AffectiveEngine:
   for (cause,ch,target),(e,intensity,source) in self._persistent_ledger.items():
    if target!=entity:continue
    seen=True;s=intensity*step
-   if e in {"joy","relief","satisfaction","love","liking","gratitude","happy-for","affection"}:raw["affection"]+=s;raw["attachment"]+=s*.5
-   if e in {"admiration","pride","gratitude","gratification"}:raw["admiration"]+=s;raw["respect"]+=s*.5
-   if e in {"anger","reproach","resentment","disappointment","fears-confirmed"}:raw["resentment"]+=s;raw["trust"]-=s
-   if e in self.REPAIR_TRUST:raw["trust"]+=s*.5;raw["resentment"]-=s*.4
-   if e in {"hate","disliking","aversion"}:raw["aversion"]+=s
-  if not seen:self.persistent_affect.pop(entity,None);return
-  self.persistent_affect[entity]=PersistentAffect(**{k:self._clamp(v) for k,v in raw.items()})
+   if e in {"joy","relief","satisfaction","love","liking","gratitude","happy-for","affection"}:raw["affection"]=self._clamp(raw["affection"]+s);raw["attachment"]=self._clamp(raw["attachment"]+s*.5)
+   if e in {"admiration","pride","gratitude","gratification"}:raw["admiration"]=self._clamp(raw["admiration"]+s);raw["respect"]=self._clamp(raw["respect"]+s*.5)
+   if e in {"anger","reproach","resentment","disappointment","fears-confirmed"}:raw["resentment"]=self._clamp(raw["resentment"]+s);raw["trust"]=self._clamp(raw["trust"]-s)
+   if e in self.REPAIR_TRUST:raw["trust"]=self._clamp(raw["trust"]+s*.5);raw["resentment"]=self._clamp(raw["resentment"]-s*.4)
+   if e in {"hate","disliking","aversion"}:raw["aversion"]=self._clamp(raw["aversion"]+s)
+  if not seen:
+   if entity in self.persistent_affect:self.persistent_affect[entity]=PersistentAffect()
+   return
+  self.persistent_affect[entity]=PersistentAffect(**raw)
  def _fatima_decay_multiplier(self,d):return self.config.emotional_half_life_decay_time/max(.01,d.half_life*max(.01,self.profile.recovery_scale))
  def _decayed_contribution(self,c,t):return c.intensity_at_t0*math.exp(math.log(self.config.half_life_decay_constant)/max(.01,self.config.emotional_half_life_decay_time)*c.decay_multiplier*max(0.,t-c.tick_t0))
  def _determine_potential(self,e,p):return max(0.,p+self._emotion_valence(e)*(self.state.mood_valence*self.config.mood_influence_on_emotion_factor))

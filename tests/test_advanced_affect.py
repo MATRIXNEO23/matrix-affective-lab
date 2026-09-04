@@ -1,4 +1,10 @@
-from src.affective_engine import AffectiveEngine, AffectiveProfile, EmotionalImpulse, EmotionDisposition
+from src.affective_engine import (
+    AffectiveEngine,
+    AffectiveProfile,
+    EmotionalImpulse,
+    EmotionDisposition,
+    OceanProfile,
+)
 from src.prototype import AffectiveStimulus, MatrixAffectivePrototype
 
 
@@ -176,6 +182,38 @@ def test_fatima_reinforce_uses_log_sum_exp_and_increases_active_emotion():
     assert before < e.state.emotions["joy"] <= 1.0
 
 
+def test_alma_anger_pad_mapping_is_exact():
+    e = AffectiveEngine()
+    e.apply_impulse(EmotionalImpulse("anger", 0.8, "e"))
+    assert abs(e.state.valence - (-0.51)) < 1e-12
+    assert abs(e.state.arousal - 0.59) < 1e-12
+    assert abs(e.state.dominance - 0.25) < 1e-12
+    assert abs(e.state.virtual_emotion_intensity - 0.75) < 1e-12
+
+
+def test_alma_virtual_emotion_center_sums_pad_then_clamps():
+    e = AffectiveEngine()
+    e.apply_impulse(EmotionalImpulse("joy", 0.8, "j"))
+    e.apply_impulse(EmotionalImpulse("fear", 0.8, "f"))
+    assert abs(e.state.valence - (-0.24)) < 1e-12
+    assert abs(e.state.arousal - 0.8) < 1e-12
+    assert abs(e.state.dominance - (-0.33)) < 1e-12
+
+
+def test_alma_ocean_to_pad_coefficients_are_exact():
+    ocean = OceanProfile(
+        openness=0.4,
+        conscientiousness=0.8,
+        extroversion=0.6,
+        agreeableness=0.3,
+        neuroticism=0.4,
+    )
+    p, a, d = AffectiveEngine.ocean_to_pad(ocean)
+    assert abs(p - (0.21 * 0.6 + 0.59 * 0.3 + 0.19 * 0.4)) < 1e-12
+    assert abs(a - (0.15 * 0.4 + 0.30 * 0.3 - 0.57 * 0.4)) < 1e-12
+    assert abs(d - (0.25 * 0.4 + 0.17 * 0.8 + 0.60 * 0.6 - 0.32 * 0.3)) < 1e-12
+
+
 def test_long_stress_sequence_stays_bounded():
     p = MatrixAffectivePrototype()
     for i in range(2000):
@@ -193,8 +231,10 @@ def test_long_stress_sequence_stays_bounded():
     for value in snap["emotions"].values():
         assert 0.0 <= value <= 1.0
     assert -1.0 <= snap["mood_valence"] <= 1.0
-    assert 0.0 <= snap["arousal"] <= 1.0
-    assert 0.0 <= snap["dominance"] <= 1.0
+    assert -1.0 <= snap["valence"] <= 1.0
+    assert -1.0 <= snap["arousal"] <= 1.0
+    assert -1.0 <= snap["dominance"] <= 1.0
+    assert 0.0 <= snap["virtual_emotion_intensity"] <= 1.0
     for affect in snap["persistent_affect"].values():
         for value in affect.values():
             assert 0.0 <= value <= 1.0

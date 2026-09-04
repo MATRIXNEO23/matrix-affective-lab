@@ -11,9 +11,30 @@ def test_saturating_repeated_distinct_causes():
 def test_same_cause_reappraisal_does_not_blindly_stack():
     e = AffectiveEngine()
     e.apply_impulse(EmotionalImpulse("anger", 0.7, "event-1", "user"))
-    first = e.state.emotions["anger"]
-    e.apply_impulse(EmotionalImpulse("anger", 0.7, "event-1", "user"))
-    assert e.state.emotions["anger"] == first
+    first_emotion = e.state.emotions["anger"]
+    first_mood = e.state.mood_valence
+    first_affect = e.persistent_affect["user"].resentment
+    changed = e.apply_impulse(EmotionalImpulse("anger", 0.7, "event-1", "user"))
+    assert changed is False
+    assert e.state.emotions["anger"] == first_emotion
+    assert e.state.mood_valence == first_mood
+    assert e.persistent_affect["user"].resentment == first_affect
+
+
+def test_reappraisal_replaces_old_intensity():
+    e = AffectiveEngine()
+    e.apply_impulse(EmotionalImpulse("anger", 0.8, "event-1", "user"))
+    e.apply_impulse(EmotionalImpulse("anger", 0.3, "event-1", "user"))
+    assert abs(e.state.emotions["anger"] - 0.3) < 1e-12
+    assert abs(e.persistent_affect["user"].resentment - 0.015) < 1e-12
+
+
+def test_reappraisal_below_threshold_extinguishes_prior_cause():
+    e = AffectiveEngine({"fear": EmotionDisposition(threshold=0.3, half_life=10.0)})
+    e.apply_impulse(EmotionalImpulse("fear", 0.8, "event", "user"))
+    changed = e.apply_impulse(EmotionalImpulse("fear", 0.2, "event", "user"))
+    assert changed is True
+    assert "fear" not in e.state.emotions
 
 
 def test_half_life_decay():
@@ -43,8 +64,15 @@ def test_persistent_affect_changes_slower_than_emotion():
     assert e.persistent_affect["user"].affection < e.state.emotions["affection"]
 
 
-def test_below_threshold_is_ignored():
+def test_below_threshold_new_evidence_is_ignored():
     e = AffectiveEngine({"fear": EmotionDisposition(threshold=0.3, half_life=10.0)})
     accepted = e.apply_impulse(EmotionalImpulse("fear", 0.2, "event"))
     assert accepted is False
     assert "fear" not in e.state.emotions
+
+
+def test_many_distinct_causes_never_exceed_one():
+    e = AffectiveEngine()
+    for i in range(1000):
+        e.apply_impulse(EmotionalImpulse("joy", 0.2, f"event-{i}"))
+    assert 0.0 <= e.state.emotions["joy"] <= 1.0

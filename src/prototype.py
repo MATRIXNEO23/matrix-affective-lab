@@ -27,12 +27,9 @@ class AffectiveStimulus:
     novelty: float = 1.0
     ambiguity: float = 0.0
     habituation_key: Optional[str] = None
-    # FAtiMA prospect branch inputs. When present, these take precedence over
-    # the reduced confirmed/unconfirmed fallback.
     goal_probability: Optional[float] = None
     previous_goal_probability: Optional[float] = None
     goal_significance: float = 1.0
-    # FAtiMA fortune-of-others branch.
     desirability_for_other: Optional[float] = None
     other_id: Optional[str] = None
 
@@ -82,12 +79,18 @@ class MatrixAffectivePrototype:
         novelty = self._clamp(s.novelty)
         habituation = self._habituation_factor(s.habituation_key)
 
-        # Cognitiv source behavior: mood bias enters appraisal. Matrix limits it
-        # to explicitly ambiguous semantic input so it cannot overturn hard NLU facts.
+        # Cognitiv source behavior: mood supplies appraisal bias. Matrix applies
+        # it only where Understanding explicitly marks semantic ambiguity.
         if ambiguity > 0.0 and self.affect.state.mood_valence != 0.0:
             desirability = max(
                 -1.0,
-                min(1.0, desirability + self.affect.state.mood_valence * 0.15 * ambiguity),
+                min(
+                    1.0,
+                    desirability
+                    + self.affect.state.mood_valence
+                    * max(0.0, self.affect.profile.mood_bias_strength)
+                    * ambiguity,
+                ),
             )
 
         modulation = novelty * habituation
@@ -96,32 +99,24 @@ class MatrixAffectivePrototype:
         actor = s.actor_id
         target = s.target_id or actor
 
-        # ---- FAtiMA fortune-of-others ----
-        if (
-            s.desirability_for_other is not None
-            and s.other_id
-            and modulation > 0.0
-        ):
+        # FAtiMA fortune-of-others branch.
+        if s.desirability_for_other is not None and s.other_id and modulation > 0.0:
             other_des = max(-1.0, min(1.0, s.desirability_for_other))
             if other_des != 0.0:
                 potential = (abs(other_des) + abs(desirability)) * 0.5 * modulation
                 if s.other_id in {self_id, actor}:
-                    etype = "joy" if potential >= 0 else "distress"
+                    etype = "joy"
                 elif desirability >= 0:
                     etype = "happy-for" if other_des >= 0 else "gloating"
                 else:
                     etype = "resentment" if other_des >= 0 else "pity"
                 impulses.append(EmotionalImpulse(
-                    etype, abs(potential), s.id, s.other_id, "fortune-other"
+                    etype, potential, s.id, s.other_id, "fortune-other"
                 ))
                 returned_compound = True
 
-        # ---- FAtiMA compound desirability + praiseworthiness ----
-        if (
-            s.standard_compliance is not None
-            and desirability != 0.0
-            and modulation > 0.0
-        ):
+        # FAtiMA compound desirability+praiseworthiness branch.
+        if s.standard_compliance is not None and desirability != 0.0 and modulation > 0.0:
             praise = max(-1.0, min(1.0, s.standard_compliance))
             if praise != 0.0:
                 potential = abs(desirability + praise) * 0.5 * modulation
@@ -138,7 +133,7 @@ class MatrixAffectivePrototype:
                     ))
                     returned_compound = True
 
-        # ---- FAtiMA standalone praiseworthiness ----
+        # FAtiMA standalone praiseworthiness branch.
         if not returned_compound and s.standard_compliance is not None and actor:
             praise = max(-1.0, min(1.0, s.standard_compliance))
             intensity = abs(praise) * modulation
@@ -154,12 +149,10 @@ class MatrixAffectivePrototype:
                     etype, intensity, s.id, direction, "standard"
                 ))
 
-        # ---- FAtiMA attraction / attribution ----
+        # FAtiMA attraction branch: OCC Love/Hate with magicFactor=0.7.
         if target and s.attitude_valence is not None:
             like = max(-1.0, min(1.0, s.attitude_valence))
             if like != 0.0:
-                # Exact FAtiMA magicFactor = 0.7, with Matrix attitude_intensity
-                # retained as a compatible strength multiplier.
                 potential = abs(like) * 0.7 * self._clamp(s.attitude_intensity) * modulation
                 impulses.append(EmotionalImpulse(
                     "love" if like >= 0 else "hate",
@@ -169,31 +162,30 @@ class MatrixAffectivePrototype:
                     "attitude",
                 ))
 
-        # ---- FAtiMA standalone well-being ----
+        # FAtiMA standalone well-being branch.
         if not returned_compound and relevance > 0.0 and desirability != 0.0 and modulation > 0.0:
-            potential = relevance * abs(desirability) * modulation
             impulses.append(EmotionalImpulse(
                 "joy" if desirability >= 0 else "distress",
-                potential,
+                relevance * abs(desirability) * modulation,
                 s.id,
                 target,
                 "goal",
             ))
 
-        # ---- FAtiMA prospect branch ----
+        # FAtiMA prospect branch.
         if s.goal_probability is not None and s.previous_goal_probability is not None:
-            p = self._clamp(s.goal_probability)
-            prev = self._clamp(s.previous_goal_probability)
-            significance = self._clamp(s.goal_significance)
-            prospect = self._appraise_goal_probability(p, prev, significance)
+            prospect = self._appraise_goal_probability(
+                self._clamp(s.goal_probability),
+                self._clamp(s.previous_goal_probability),
+                self._clamp(s.goal_significance),
+            )
             if prospect is not None:
                 etype, potential = prospect
                 impulses.append(EmotionalImpulse(
                     etype, potential * modulation, s.id, target, "prospect"
                 ))
         elif relevance > 0.0 and not s.confirmed and desirability != 0.0:
-            # Compatibility fallback for current Matrix-NLU contract until it
-            # exposes explicit likelihood deltas.
+            # Temporary compatibility until Matrix-NLU emits likelihood deltas.
             impulses.append(EmotionalImpulse(
                 "hope" if desirability > 0 else "fear",
                 relevance * abs(desirability) * modulation,
@@ -216,24 +208,22 @@ class MatrixAffectivePrototype:
     def _appraise_goal_probability(
         probability: float, previous: float, significance: float
     ) -> Optional[tuple[str, float]]:
-        """Direct normalized port of FAtiMA AppraiseGoalSuccessProbability."""
         if previous == probability:
             return ("hope", 0.0)
         if probability > previous:
             if probability == 1.0:
                 if previous <= 0.5:
-                    return ("relief", abs(probability) * significance)
-                return ("satisfaction", abs(probability) * significance)
-            return ("hope", abs(probability) * significance)
+                    return ("relief", probability * significance)
+                return ("satisfaction", probability * significance)
+            return ("hope", probability * significance)
         if probability == 0.0:
             if previous >= 0.5:
-                return ("disappointment", (1.0 - probability) * significance)
-            return ("fears-confirmed", (1.0 - probability) * significance)
+                return ("disappointment", significance)
+            return ("fears-confirmed", significance)
         return ("fear", (1.0 - probability) * significance)
 
     def _habituation_factor(self, key: Optional[str]) -> float:
-        # Matrix experimental extension. Kept isolated from the source-derived
-        # OCC math and applied only when callers explicitly provide a key.
+        # Matrix extension, isolated from source-derived OCC logic.
         if not key:
             return 1.0
         count = self._habituation_counts.get(key, 0)

@@ -15,6 +15,8 @@ class AffectiveStimulus:
     goal_relevance: float = 0.0
     goal_congruence: float = 0.0
     standard_compliance: Optional[float] = None
+    attitude_valence: Optional[float] = None
+    attitude_intensity: float = 0.0
     confirmed: bool = True
     novelty: float = 0.0
 
@@ -40,9 +42,9 @@ class AffectiveTrace:
 class MatrixAffectivePrototype:
     """Compact end-to-end affective prototype.
 
-    Reduced-OCC appraisal and affect integration live behind one public engine
-    because Matrix currently consumes them as one operation. The underlying
-    affect state remains isolated and testable.
+    Uses the reduced OCC split already present in FAtiMA/Cognitiv:
+    event->goal, action->standard, entity->attitude. Matrix keeps one public
+    operation while the affect state remains isolated and testable.
     """
 
     def __init__(self, affect: AffectiveEngine | None = None):
@@ -63,31 +65,47 @@ class MatrixAffectivePrototype:
         return self.affect.snapshot()
 
     def _appraise(self, s: AffectiveStimulus, self_id: str) -> AppraisalResult:
-        # Reduced OCC: FAtiMA's proven event/goal and action/standard split,
-        # compacted into the Matrix public engine instead of another module.
         relevance = self._clamp(s.goal_relevance)
         congruence = max(-1.0, min(1.0, s.goal_congruence))
         impulses: list[EmotionalImpulse] = []
 
+        # OCC event -> goal consequence.
         if relevance > 0.0 and congruence != 0.0:
             intensity = min(1.0, relevance * abs(congruence))
-            if congruence > 0:
-                emotion = "joy" if s.confirmed else "hope"
-            else:
-                emotion = "distress" if s.confirmed else "fear"
+            emotion = (
+                "joy" if s.confirmed else "hope"
+                if congruence > 0 else
+                "distress" if s.confirmed else "fear"
+            )
             impulses.append(EmotionalImpulse(emotion, intensity, s.id, s.actor_id or s.target_id))
 
+        # OCC action -> standard appraisal.
         if s.category == "action" and s.actor_id and s.standard_compliance is not None:
             compliance = max(-1.0, min(1.0, s.standard_compliance))
             if compliance != 0.0:
                 is_self = s.actor_id == self_id
                 emotion = (
-                    "pride" if is_self else "admiration"
+                    ("pride" if is_self else "admiration")
                     if compliance > 0 else
-                    "shame" if is_self else "reproach"
+                    ("shame" if is_self else "reproach")
                 )
                 impulses.append(EmotionalImpulse(
                     emotion, abs(compliance), s.id, None if is_self else s.actor_id
+                ))
+
+        # OCC entity -> attitude appraisal. Kept structured: Understanding/App
+        # supplies attitude evidence; this engine never infers it from text.
+        target = s.target_id or s.actor_id
+        if target and s.attitude_valence is not None:
+            valence = max(-1.0, min(1.0, s.attitude_valence))
+            strength = self._clamp(s.attitude_intensity)
+            intensity = abs(valence) * strength
+            if intensity > 0.0:
+                impulses.append(EmotionalImpulse(
+                    "liking" if valence > 0 else "disliking",
+                    intensity,
+                    s.id,
+                    target,
                 ))
 
         return AppraisalResult(

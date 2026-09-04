@@ -79,8 +79,6 @@ class MatrixAffectivePrototype:
         novelty = self._clamp(s.novelty)
         habituation = self._habituation_factor(s.habituation_key)
 
-        # Cognitiv source behavior: mood supplies appraisal bias. Matrix applies
-        # it only where Understanding explicitly marks semantic ambiguity.
         if ambiguity > 0.0 and self.affect.state.mood_valence != 0.0:
             desirability = max(
                 -1.0,
@@ -98,8 +96,10 @@ class MatrixAffectivePrototype:
         returned_compound = False
         actor = s.actor_id
         target = s.target_id or actor
+        has_explicit_prospect = (
+            s.goal_probability is not None and s.previous_goal_probability is not None
+        )
 
-        # FAtiMA fortune-of-others branch.
         if s.desirability_for_other is not None and s.other_id and modulation > 0.0:
             other_des = max(-1.0, min(1.0, s.desirability_for_other))
             if other_des != 0.0:
@@ -115,7 +115,6 @@ class MatrixAffectivePrototype:
                 ))
                 returned_compound = True
 
-        # FAtiMA compound desirability+praiseworthiness branch.
         if s.standard_compliance is not None and desirability != 0.0 and modulation > 0.0:
             praise = max(-1.0, min(1.0, s.standard_compliance))
             if praise != 0.0:
@@ -133,7 +132,6 @@ class MatrixAffectivePrototype:
                     ))
                     returned_compound = True
 
-        # FAtiMA standalone praiseworthiness branch.
         if not returned_compound and s.standard_compliance is not None and actor:
             praise = max(-1.0, min(1.0, s.standard_compliance))
             intensity = abs(praise) * modulation
@@ -149,7 +147,6 @@ class MatrixAffectivePrototype:
                     etype, intensity, s.id, direction, "standard"
                 ))
 
-        # FAtiMA attraction branch: OCC Love/Hate with magicFactor=0.7.
         if target and s.attitude_valence is not None:
             like = max(-1.0, min(1.0, s.attitude_valence))
             if like != 0.0:
@@ -162,8 +159,19 @@ class MatrixAffectivePrototype:
                     "attitude",
                 ))
 
-        # FAtiMA standalone well-being branch.
-        if not returned_compound and relevance > 0.0 and desirability != 0.0 and modulation > 0.0:
+        # FAtiMA well-being applies to established desirability. During the
+        # temporary Matrix confirmed/unconfirmed compatibility path, an
+        # unconfirmed outcome represents a prospect, not an established event;
+        # therefore it is routed only to Hope/Fear below. When explicit FAtiMA
+        # goal-probability variables are supplied, both appraisal-variable
+        # branches remain available exactly as in the source implementation.
+        if (
+            not returned_compound
+            and relevance > 0.0
+            and desirability != 0.0
+            and modulation > 0.0
+            and (s.confirmed or has_explicit_prospect)
+        ):
             impulses.append(EmotionalImpulse(
                 "joy" if desirability >= 0 else "distress",
                 relevance * abs(desirability) * modulation,
@@ -172,8 +180,7 @@ class MatrixAffectivePrototype:
                 "goal",
             ))
 
-        # FAtiMA prospect branch.
-        if s.goal_probability is not None and s.previous_goal_probability is not None:
+        if has_explicit_prospect:
             prospect = self._appraise_goal_probability(
                 self._clamp(s.goal_probability),
                 self._clamp(s.previous_goal_probability),
@@ -185,7 +192,6 @@ class MatrixAffectivePrototype:
                     etype, potential * modulation, s.id, target, "prospect"
                 ))
         elif relevance > 0.0 and not s.confirmed and desirability != 0.0:
-            # Temporary compatibility until Matrix-NLU emits likelihood deltas.
             impulses.append(EmotionalImpulse(
                 "hope" if desirability > 0 else "fear",
                 relevance * abs(desirability) * modulation,
@@ -223,7 +229,6 @@ class MatrixAffectivePrototype:
         return ("fear", (1.0 - probability) * significance)
 
     def _habituation_factor(self, key: Optional[str]) -> float:
-        # Matrix extension, isolated from source-derived OCC logic.
         if not key:
             return 1.0
         count = self._habituation_counts.get(key, 0)

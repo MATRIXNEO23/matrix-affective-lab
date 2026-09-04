@@ -12,7 +12,9 @@ from typing import Dict, Optional
 # - Assets/EmotionalAppraisal/EmotionalAppraisalConfiguration.cs
 # Adaptation: FAtiMA's internal [0,10] scale is normalized to [0,1].
 # Cognitiv (MIT), commit f3aad875a77a3c7c522781e03acbb1944c3ab25c:
-# - cognitiv/emotion.py dimensional V/A/D aggregation and saturation.
+# - cognitiv/emotion.py saturation across independent impulses.
+# Alma.Net (MIT), commit 55b0475abdd077f145ed90575b435111c288454e:
+# - src/AlmaNet/Alma.cs OCEAN->PAD and emotion->PAD mappings.
 
 
 @dataclass(frozen=True)
@@ -31,16 +33,24 @@ class EmotionDisposition:
 
 
 @dataclass(frozen=True)
+class OceanProfile:
+    openness: float = 0.0
+    conscientiousness: float = 0.0
+    extroversion: float = 0.0
+    agreeableness: float = 0.0
+    neuroticism: float = 0.0
+
+
+@dataclass(frozen=True)
 class AffectiveProfile:
     reactivity: float = 1.0
     positive_reactivity: float = 1.0
     negative_reactivity: float = 1.0
     recovery_scale: float = 1.0
     persistent_step: float = 0.05
-    # Cognitiv-compatible appraisal knob retained for the prototype adapter.
     mood_bias_strength: float = 0.15
-    # Optional override; None keeps the FAtiMA default from AffectiveConfig.
     mood_half_life: Optional[float] = None
+    ocean: Optional[OceanProfile] = None
 
 
 @dataclass(frozen=True)
@@ -59,7 +69,8 @@ class EmotionState:
     emotions: Dict[str, float] = field(default_factory=dict)
     valence: float = 0.0
     arousal: float = 0.0
-    dominance: float = 0.5
+    dominance: float = 0.0
+    virtual_emotion_intensity: float = 0.0
     mood_valence: float = 0.0
     mood_arousal: float = 0.0
 
@@ -101,13 +112,34 @@ class AffectiveEngine:
         "reproach", "shame", "remorse", "resentment", "hate", "disliking",
         "pity", "aversion",
     }
-    HIGH_AROUSAL = {
-        "anger", "fear", "fears-confirmed", "joy", "distress", "gratitude",
-        "gratification", "reproach",
+
+    # Direct port of Alma.Net Alma.MapToPadSpace.
+    ALMA_PAD = {
+        "admiration": (0.5, 0.3, -0.2),
+        "anger": (-0.51, 0.59, 0.25),
+        "disliking": (-0.4, 0.2, 0.1),
+        "disappointment": (-0.3, 0.1, -0.4),
+        "distress": (-0.4, -0.2, -0.5),
+        "fear": (-0.64, 0.60, -0.43),
+        "fears-confirmed": (-0.5, -0.3, -0.7),
+        "gloating": (0.3, -0.3, -0.1),
+        "gratification": (0.6, 0.5, 0.4),
+        "gratitude": (0.4, 0.2, -0.3),
+        "happy-for": (0.4, 0.2, 0.2),
+        "hate": (-0.6, 0.6, 0.3),
+        "hope": (0.2, 0.2, -0.1),
+        "joy": (0.4, 0.2, 0.1),
+        "liking": (0.4, 0.16, -0.24),
+        "love": (0.3, 0.1, 0.2),
+        "pity": (-0.4, -0.2, -0.5),
+        "pride": (0.4, 0.3, 0.3),
+        "relief": (0.2, -0.3, 0.4),
+        "remorse": (-0.3, 0.1, -0.6),
+        "reproach": (-0.3, -0.1, 0.4),
+        "resentment": (-0.2, -0.3, -0.2),
+        "satisfaction": (0.3, -0.2, 0.4),
+        "shame": (-0.3, 0.1, -0.6),
     }
-    LOW_AROUSAL = {"relief", "satisfaction", "pity", "liking", "disliking"}
-    HIGH_DOMINANCE = {"anger", "pride", "admiration", "gloating", "gratification"}
-    LOW_DOMINANCE = {"fear", "distress", "shame", "remorse", "pity", "disappointment"}
 
     def __init__(
         self,
@@ -128,6 +160,31 @@ class AffectiveEngine:
     def disposition(self, emotion_type: str) -> EmotionDisposition:
         return self.dispositions.get(emotion_type, EmotionDisposition())
 
+    @staticmethod
+    def ocean_to_pad(ocean: OceanProfile) -> tuple[float, float, float]:
+        # Direct port of Alma.ToPadModel(OceanModel).
+        p = (
+            0.21 * ocean.extroversion
+            + 0.59 * ocean.agreeableness
+            + 0.19 * ocean.neuroticism
+        )
+        a = (
+            0.15 * ocean.openness
+            + 0.30 * ocean.agreeableness
+            - 0.57 * ocean.neuroticism
+        )
+        d = (
+            0.25 * ocean.openness
+            + 0.17 * ocean.conscientiousness
+            + 0.60 * ocean.extroversion
+            - 0.32 * ocean.agreeableness
+        )
+        return (
+            max(-1.0, min(1.0, p)),
+            max(-1.0, min(1.0, a)),
+            max(-1.0, min(1.0, d)),
+        )
+
     def contribution_for(
         self, cause_id: str, appraisal_channel: str, target_id: Optional[str]
     ) -> Optional[tuple[str, float]]:
@@ -141,9 +198,6 @@ class AffectiveEngine:
         previous = self._contributions.get(slot)
         raw_potential = self._profiled_intensity(impulse.emotion_type, impulse.intensity)
 
-        # Matrix semantic adapter: replaying the identical validated appraisal is
-        # idempotent. FAtiMA assumes a new appraisal call carries new evidence;
-        # our event bus can legitimately deliver the same event more than once.
         if (
             previous is not None
             and previous.emotion_type == impulse.emotion_type
@@ -164,9 +218,6 @@ class AffectiveEngine:
         disp = self.disposition(impulse.emotion_type)
         threshold = self._clamp(disp.threshold)
 
-        # Matrix semantic adapter: explicit zero/below-threshold source evidence
-        # extinguishes a prior appraisal. Mood may modulate a real appraisal but
-        # cannot manufacture one from semantically absent evidence.
         if raw_potential <= threshold:
             self._update_dimensions()
             return previous is not None
@@ -188,7 +239,6 @@ class AffectiveEngine:
         self._contributions[slot] = new
         self._recompute_emotion(new.emotion_type)
 
-        # Direct FAtiMA behavior: a reappraisal does not push mood again.
         if previous is None and self._influences_mood(new.emotion_type):
             self._update_mood_from_new_emotion(new.emotion_type, intensity)
 
@@ -219,7 +269,13 @@ class AffectiveEngine:
             self._recompute_emotion(emotion_type)
         self._update_dimensions()
 
-    def reinforce(self, cause_id: str, appraisal_channel: str, target_id: Optional[str], potential: float) -> bool:
+    def reinforce(
+        self,
+        cause_id: str,
+        appraisal_channel: str,
+        target_id: Optional[str],
+        potential: float,
+    ) -> bool:
         slot = (cause_id, appraisal_channel, target_id)
         c = self._contributions.get(slot)
         if c is None:
@@ -246,7 +302,9 @@ class AffectiveEngine:
         return True
 
     def _fatima_decay_multiplier(self, disp: EmotionDisposition) -> float:
-        effective_half_life = max(0.01, disp.half_life * max(0.01, self.profile.recovery_scale))
+        effective_half_life = max(
+            0.01, disp.half_life * max(0.01, self.profile.recovery_scale)
+        )
         return self.config.emotional_half_life_decay_time / effective_half_life
 
     def _decayed_contribution(self, c: _Contribution, tick: float) -> float:
@@ -296,6 +354,7 @@ class AffectiveEngine:
             self.state.mood_valence = value
 
     def _recompute_emotion(self, emotion_type: str) -> None:
+        # Cognitiv saturation port across independent active causes.
         vals = [
             self._decayed_contribution(c, self._time)
             for c in self._contributions.values()
@@ -310,29 +369,39 @@ class AffectiveEngine:
         self.state.emotions[emotion_type] = self._clamp(1.0 - remaining)
 
     def _update_dimensions(self) -> None:
-        emotions = self.state.emotions
-        if not emotions:
-            self.state.valence = self.state.mood_valence * 0.1
-            self.state.arousal = self.state.mood_arousal * 0.1
-            self.state.dominance = 0.5
+        # Direct port of Alma.GetVirtualEmotionCenter for the PAD center:
+        # coordinates are summed over active emotion types and clamped; the
+        # virtual emotion intensity is the average active intensity.
+        if not self.state.emotions:
+            self.state.valence = 0.0
+            self.state.arousal = 0.0
+            self.state.dominance = 0.0
+            self.state.virtual_emotion_intensity = 0.0
             return
 
-        pos = sum(emotions.get(e, 0.0) for e in self.POSITIVE)
-        neg = sum(emotions.get(e, 0.0) for e in self.NEGATIVE)
-        total = pos + neg
-        self.state.valence = (pos - neg) / total if total > 0 else 0.0
+        p = a = d = total_intensity = 0.0
+        mapped = 0
+        for emotion_type, intensity in self.state.emotions.items():
+            pad = self.ALMA_PAD.get(emotion_type)
+            if pad is None:
+                continue
+            p += pad[0]
+            a += pad[1]
+            d += pad[2]
+            total_intensity += intensity
+            mapped += 1
 
-        high = sum(emotions.get(e, 0.0) for e in self.HIGH_AROUSAL)
-        low = sum(emotions.get(e, 0.0) for e in self.LOW_AROUSAL)
-        all_intensities = sum(emotions.values())
-        self.state.arousal = min(1.0, (high + low * 0.3) / all_intensities) if all_intensities > 0 else 0.0
+        if mapped == 0:
+            self.state.valence = 0.0
+            self.state.arousal = 0.0
+            self.state.dominance = 0.0
+            self.state.virtual_emotion_intensity = 0.0
+            return
 
-        hi_dom = sum(emotions.get(e, 0.0) for e in self.HIGH_DOMINANCE)
-        lo_dom = sum(emotions.get(e, 0.0) for e in self.LOW_DOMINANCE)
-        dom_total = hi_dom + lo_dom
-        self.state.dominance = 0.5 + 0.5 * (hi_dom - lo_dom) / dom_total if dom_total > 0 else 0.5
-        # Cognitiv updates mood via a separate update_mood(delta_time) call.
-        # Do not mutate mood here: dimensional recomputation must be idempotent.
+        self.state.valence = max(-1.0, min(1.0, p))
+        self.state.arousal = max(-1.0, min(1.0, a))
+        self.state.dominance = max(-1.0, min(1.0, d))
+        self.state.virtual_emotion_intensity = self._clamp(total_intensity / mapped)
 
     def _profiled_intensity(self, emotion_type: str, value: float) -> float:
         scale = self.profile.reactivity
@@ -359,29 +428,38 @@ class AffectiveEngine:
     def _update_persistent_affect(
         self, entity_id: str, emotion_type: str, intensity_delta: float
     ) -> None:
+        # Matrix-owned extension, intentionally outside source-derived core math.
         if math.isclose(intensity_delta, 0.0, rel_tol=0.0, abs_tol=1e-12):
             return
         affect = self.persistent_affect.setdefault(entity_id, PersistentAffect())
         step = intensity_delta * max(0.0, self.profile.persistent_step)
 
-        if emotion_type in {"joy", "relief", "satisfaction", "love", "liking", "gratitude", "happy-for", "affection"}:
+        if emotion_type in {
+            "joy", "relief", "satisfaction", "love", "liking", "gratitude",
+            "happy-for", "affection",
+        }:
             affect.affection = self._clamp(affect.affection + step)
             affect.attachment = self._clamp(affect.attachment + step * 0.5)
         if emotion_type in {"admiration", "pride", "gratitude", "gratification"}:
             affect.admiration = self._clamp(affect.admiration + step)
             affect.respect = self._clamp(affect.respect + step * 0.5)
-        if emotion_type in {"anger", "reproach", "resentment", "disappointment", "fears-confirmed"}:
+        if emotion_type in {
+            "anger", "reproach", "resentment", "disappointment", "fears-confirmed",
+        }:
             affect.resentment = self._clamp(affect.resentment + step)
             affect.trust = self._clamp(affect.trust - step)
         if emotion_type in {"hate", "disliking", "aversion"}:
             affect.aversion = self._clamp(affect.aversion + step)
 
     def snapshot(self) -> dict:
+        default_pad = self.ocean_to_pad(self.profile.ocean) if self.profile.ocean else None
         return {
             "emotions": dict(self.state.emotions),
             "valence": self.state.valence,
             "arousal": self.state.arousal,
             "dominance": self.state.dominance,
+            "virtual_emotion_intensity": self.state.virtual_emotion_intensity,
+            "default_personality_pad": default_pad,
             "mood_valence": self.state.mood_valence,
             "mood_arousal": self.state.mood_arousal,
             "persistent_affect": {

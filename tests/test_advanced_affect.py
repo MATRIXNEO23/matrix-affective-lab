@@ -108,6 +108,36 @@ def test_mood_relaxes_even_after_all_emotions_are_gone():
     assert m2 < m1
 
 
+def test_hope_confirmed_negative_becomes_disappointment():
+    p = MatrixAffectivePrototype()
+    p.process(AffectiveStimulus(
+        id="outcome", category="event", actor_id="u",
+        goal_relevance=1.0, goal_congruence=0.7, confirmed=False,
+    ))
+    trace = p.process(AffectiveStimulus(
+        id="outcome", category="event", actor_id="u",
+        goal_relevance=1.0, goal_congruence=-0.8, confirmed=True,
+    ))
+    assert trace.appraisal.impulses[0].emotion_type == "disappointment"
+    assert "hope" not in trace.after["emotions"]
+    assert trace.after["emotions"]["disappointment"] > 0
+
+
+def test_fear_disconfirmed_by_positive_outcome_becomes_relief():
+    p = MatrixAffectivePrototype()
+    p.process(AffectiveStimulus(
+        id="threat", category="event", actor_id="u",
+        goal_relevance=1.0, goal_congruence=-0.7, confirmed=False,
+    ))
+    trace = p.process(AffectiveStimulus(
+        id="threat", category="event", actor_id="u",
+        goal_relevance=1.0, goal_congruence=0.8, confirmed=True,
+    ))
+    assert trace.appraisal.impulses[0].emotion_type == "relief"
+    assert "fear" not in trace.after["emotions"]
+    assert trace.after["emotions"]["relief"] > 0
+
+
 def test_long_stress_sequence_stays_bounded():
     p = MatrixAffectivePrototype()
     for i in range(2000):

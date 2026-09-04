@@ -70,7 +70,7 @@ class AffectiveEngine:
    if e in {"joy","relief","satisfaction","love","liking","gratitude","happy-for","affection"}:raw["affection"]=self._clamp(raw["affection"]+s);raw["attachment"]=self._clamp(raw["attachment"]+s*.5)
    if e in {"admiration","pride","gratitude","gratification"}:raw["admiration"]=self._clamp(raw["admiration"]+s);raw["respect"]=self._clamp(raw["respect"]+s*.5)
    if e in {"anger","reproach","resentment","disappointment","fears-confirmed"}:raw["resentment"]=self._clamp(raw["resentment"]+s);raw["trust"]=self._clamp(raw["trust"]-s)
-   if e in self.REPAIR_TRUST:raw["trust"]=self._clamp(raw["trust"]+s*.5);raw["resentment"]=self._clamp(raw["resentment"]-s*.4)
+   if e in self.REPAIR_TRUST:raw["trust"]=self._clamp(raw["trust"]+s*.3);raw["resentment"]=self._clamp(raw["resentment"]-s*.4)
    if e in {"hate","disliking","aversion"}:raw["aversion"]=self._clamp(raw["aversion"]+s)
   if not seen:
    if entity in self.persistent_affect:self.persistent_affect[entity]=PersistentAffect()

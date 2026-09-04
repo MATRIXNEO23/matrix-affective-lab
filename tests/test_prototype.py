@@ -51,6 +51,28 @@ def test_self_good_action_is_pride_without_external_target():
     assert trace.appraisal.impulses[0].target_id is None
 
 
+def test_entity_attitude_generates_liking_and_persistent_affect():
+    p = MatrixAffectivePrototype()
+    trace = p.process(AffectiveStimulus(
+        id="meet-alice", category="entity", target_id="alice",
+        attitude_valence=0.8, attitude_intensity=0.75,
+    ))
+    assert trace.appraisal.impulses[0].emotion_type == "liking"
+    assert abs(trace.appraisal.impulses[0].intensity - 0.6) < 1e-9
+    assert trace.after["persistent_affect"]["alice"]["affection"] > 0
+
+
+def test_negative_entity_attitude_is_scoped():
+    p = MatrixAffectivePrototype()
+    trace = p.process(AffectiveStimulus(
+        id="meet-bob", category="entity", target_id="bob",
+        attitude_valence=-1.0, attitude_intensity=0.7,
+    ))
+    assert trace.appraisal.impulses[0].emotion_type == "disliking"
+    assert trace.after["persistent_affect"]["bob"]["aversion"] > 0
+    assert "alice" not in trace.after["persistent_affect"]
+
+
 def test_trace_preserves_before_after():
     p = MatrixAffectivePrototype()
     trace = p.process(AffectiveStimulus(

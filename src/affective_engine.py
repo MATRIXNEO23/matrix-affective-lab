@@ -76,6 +76,12 @@ class AffectiveEngine:
     def disposition(self, emotion_type: str) -> EmotionDisposition:
         return self.dispositions.get(emotion_type, EmotionDisposition())
 
+    def contribution_for(
+        self, cause_id: str, appraisal_channel: str, target_id: Optional[str]
+    ) -> Optional[tuple[str, float]]:
+        c = self._contributions.get((cause_id, appraisal_channel, target_id))
+        return None if c is None else (c.emotion_type, c.intensity)
+
     def apply_impulse(self, impulse: EmotionalImpulse) -> bool:
         intensity = self._profiled_intensity(impulse.emotion_type, impulse.intensity)
         slot = (impulse.cause_id, impulse.appraisal_channel, impulse.target_id)
@@ -145,7 +151,6 @@ class AffectiveEngine:
             self._update_mood_from_emotions()
 
     def compound_emotions(self) -> Dict[str, float]:
-        """Derived compounds; no extra mutable emotion state is introduced."""
         e = self.state.emotions
         compounds: Dict[str, float] = {}
         pairs = {

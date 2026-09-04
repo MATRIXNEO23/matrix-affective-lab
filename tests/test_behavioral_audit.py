@@ -1,4 +1,5 @@
 from src.affective_engine import AffectiveEngine, EmotionalImpulse
+from src.prototype import AffectiveStimulus, MatrixAffectivePrototype
 
 
 def test_late_semantic_correction_fully_reverses_persistent_affect():
@@ -41,3 +42,34 @@ def test_replaying_same_event_remains_persistent_idempotent():
     assert e.apply_impulse(impulse) is False
     second = e.snapshot()["persistent_affect"]["user"].copy()
     assert second == first
+
+
+def test_duplicate_delivery_does_not_consume_future_habituation():
+    p = MatrixAffectivePrototype()
+    first = AffectiveStimulus(
+        id="compliment-1", category="event", actor_id="user",
+        goal_relevance=1.0, goal_congruence=0.8,
+        habituation_key="compliment",
+    )
+    p.process(first)
+    p.process(first)  # duplicate bus delivery: must not count as new exposure
+    second = p.process(AffectiveStimulus(
+        id="compliment-2", category="event", actor_id="user",
+        goal_relevance=1.0, goal_congruence=0.8,
+        habituation_key="compliment",
+    ))
+    expected = max(0.2, __import__("math").exp(-0.35))
+    assert abs(second.appraisal.habituation_factor - expected) < 1e-12
+
+
+def test_habituation_still_counts_distinct_evidence():
+    p = MatrixAffectivePrototype()
+    factors = []
+    for i in range(3):
+        trace = p.process(AffectiveStimulus(
+            id=f"event-{i}", category="event", actor_id="user",
+            goal_relevance=1.0, goal_congruence=0.7,
+            habituation_key="same-pattern",
+        ))
+        factors.append(trace.appraisal.habituation_factor)
+    assert factors[0] > factors[1] > factors[2]

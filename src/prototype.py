@@ -57,6 +57,7 @@ class MatrixAffectivePrototype:
     def __init__(self, affect: AffectiveEngine | None = None):
         self.affect = affect or AffectiveEngine()
         self._habituation_counts: dict[str, int] = {}
+        self._habituation_seen: dict[str, set[str]] = {}
 
     def process(self, stimulus: AffectiveStimulus, self_id: str = "self") -> AffectiveTrace:
         before = self.affect.snapshot()
@@ -77,28 +78,17 @@ class MatrixAffectivePrototype:
         desirability = max(-1.0, min(1.0, s.goal_congruence))
         ambiguity = self._clamp(s.ambiguity)
         novelty = self._clamp(s.novelty)
-        habituation = self._habituation_factor(s.habituation_key)
+        habituation = self._habituation_factor(s.habituation_key, s.id)
 
         if ambiguity > 0.0 and self.affect.state.mood_valence != 0.0:
-            desirability = max(
-                -1.0,
-                min(
-                    1.0,
-                    desirability
-                    + self.affect.state.mood_valence
-                    * max(0.0, self.affect.profile.mood_bias_strength)
-                    * ambiguity,
-                ),
-            )
+            desirability = max(-1.0, min(1.0, desirability + self.affect.state.mood_valence * max(0.0, self.affect.profile.mood_bias_strength) * ambiguity))
 
         modulation = novelty * habituation
         impulses: list[EmotionalImpulse] = []
         returned_compound = False
         actor = s.actor_id
         target = s.target_id or actor
-        has_explicit_prospect = (
-            s.goal_probability is not None and s.previous_goal_probability is not None
-        )
+        has_explicit_prospect = s.goal_probability is not None and s.previous_goal_probability is not None
 
         if s.desirability_for_other is not None and s.other_id and modulation > 0.0:
             other_des = max(-1.0, min(1.0, s.desirability_for_other))
@@ -110,9 +100,7 @@ class MatrixAffectivePrototype:
                     etype = "happy-for" if other_des >= 0 else "gloating"
                 else:
                     etype = "resentment" if other_des >= 0 else "pity"
-                impulses.append(EmotionalImpulse(
-                    etype, potential, s.id, s.other_id, "fortune-other"
-                ))
+                impulses.append(EmotionalImpulse(etype, potential, s.id, s.other_id, "fortune-other"))
                 returned_compound = True
 
         if s.standard_compliance is not None and desirability != 0.0 and modulation > 0.0:
@@ -127,9 +115,7 @@ class MatrixAffectivePrototype:
                     else:
                         etype = "gratitude" if desirability > 0 else "anger"
                         direction = actor
-                    impulses.append(EmotionalImpulse(
-                        etype, potential, s.id, direction, "compound"
-                    ))
+                    impulses.append(EmotionalImpulse(etype, potential, s.id, direction, "compound"))
                     returned_compound = True
 
         if not returned_compound and s.standard_compliance is not None and actor:
@@ -143,97 +129,49 @@ class MatrixAffectivePrototype:
                 else:
                     etype = "admiration" if praise >= 0 else "reproach"
                     direction = actor
-                impulses.append(EmotionalImpulse(
-                    etype, intensity, s.id, direction, "standard"
-                ))
+                impulses.append(EmotionalImpulse(etype, intensity, s.id, direction, "standard"))
 
         if target and s.attitude_valence is not None:
             like = max(-1.0, min(1.0, s.attitude_valence))
             if like != 0.0:
                 potential = abs(like) * 0.7 * self._clamp(s.attitude_intensity) * modulation
-                impulses.append(EmotionalImpulse(
-                    "love" if like >= 0 else "hate",
-                    potential,
-                    s.id,
-                    target,
-                    "attitude",
-                ))
+                impulses.append(EmotionalImpulse("love" if like >= 0 else "hate", potential, s.id, target, "attitude"))
 
-        # FAtiMA well-being applies to established desirability. During the
-        # temporary Matrix confirmed/unconfirmed compatibility path, an
-        # unconfirmed outcome represents a prospect, not an established event;
-        # therefore it is routed only to Hope/Fear below. When explicit FAtiMA
-        # goal-probability variables are supplied, both appraisal-variable
-        # branches remain available exactly as in the source implementation.
-        if (
-            not returned_compound
-            and relevance > 0.0
-            and desirability != 0.0
-            and modulation > 0.0
-            and (s.confirmed or has_explicit_prospect)
-        ):
-            impulses.append(EmotionalImpulse(
-                "joy" if desirability >= 0 else "distress",
-                relevance * abs(desirability) * modulation,
-                s.id,
-                target,
-                "goal",
-            ))
+        if not returned_compound and relevance > 0.0 and desirability != 0.0 and modulation > 0.0 and (s.confirmed or has_explicit_prospect):
+            impulses.append(EmotionalImpulse("joy" if desirability >= 0 else "distress", relevance * abs(desirability) * modulation, s.id, target, "goal"))
 
         if has_explicit_prospect:
-            prospect = self._appraise_goal_probability(
-                self._clamp(s.goal_probability),
-                self._clamp(s.previous_goal_probability),
-                self._clamp(s.goal_significance),
-            )
+            prospect = self._appraise_goal_probability(self._clamp(s.goal_probability), self._clamp(s.previous_goal_probability), self._clamp(s.goal_significance))
             if prospect is not None:
                 etype, potential = prospect
-                impulses.append(EmotionalImpulse(
-                    etype, potential * modulation, s.id, target, "prospect"
-                ))
+                impulses.append(EmotionalImpulse(etype, potential * modulation, s.id, target, "prospect"))
         elif relevance > 0.0 and not s.confirmed and desirability != 0.0:
-            impulses.append(EmotionalImpulse(
-                "hope" if desirability > 0 else "fear",
-                relevance * abs(desirability) * modulation,
-                s.id,
-                target,
-                "prospect",
-            ))
+            impulses.append(EmotionalImpulse("hope" if desirability > 0 else "fear", relevance * abs(desirability) * modulation, s.id, target, "prospect"))
 
-        return AppraisalResult(
-            s.id,
-            relevance,
-            desirability,
-            s.actor_id,
-            novelty,
-            habituation,
-            tuple(impulses),
-        )
+        return AppraisalResult(s.id, relevance, desirability, s.actor_id, novelty, habituation, tuple(impulses))
 
     @staticmethod
-    def _appraise_goal_probability(
-        probability: float, previous: float, significance: float
-    ) -> Optional[tuple[str, float]]:
+    def _appraise_goal_probability(probability: float, previous: float, significance: float) -> Optional[tuple[str, float]]:
         if previous == probability:
             return ("hope", 0.0)
         if probability > previous:
             if probability == 1.0:
-                if previous <= 0.5:
-                    return ("relief", probability * significance)
-                return ("satisfaction", probability * significance)
+                return (("relief" if previous <= 0.5 else "satisfaction"), probability * significance)
             return ("hope", probability * significance)
         if probability == 0.0:
-            if previous >= 0.5:
-                return ("disappointment", significance)
-            return ("fears-confirmed", significance)
+            return (("disappointment" if previous >= 0.5 else "fears-confirmed"), significance)
         return ("fear", (1.0 - probability) * significance)
 
-    def _habituation_factor(self, key: Optional[str]) -> float:
+    def _habituation_factor(self, key: Optional[str], stimulus_id: str) -> float:
         if not key:
             return 1.0
+        seen = self._habituation_seen.setdefault(key, set())
         count = self._habituation_counts.get(key, 0)
-        self._habituation_counts[key] = count + 1
-        return max(0.2, math.exp(-0.35 * count))
+        factor = max(0.2, math.exp(-0.35 * count))
+        if stimulus_id not in seen:
+            seen.add(stimulus_id)
+            self._habituation_counts[key] = count + 1
+        return factor
 
     @staticmethod
     def _clamp(value: float) -> float:

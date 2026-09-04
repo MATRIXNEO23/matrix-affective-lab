@@ -29,6 +29,25 @@ def test_reappraisal_replaces_old_intensity():
     assert abs(e.persistent_affect["user"].resentment - 0.015) < 1e-12
 
 
+def test_reappraisal_can_replace_negative_emotion_with_positive_emotion():
+    e = AffectiveEngine()
+    e.apply_impulse(EmotionalImpulse("reproach", 0.8, "event-1", "user", "standard"))
+    assert e.persistent_affect["user"].trust < 0.5
+    e.apply_impulse(EmotionalImpulse("admiration", 0.7, "event-1", "user", "standard"))
+    assert "reproach" not in e.state.emotions
+    assert abs(e.state.emotions["admiration"] - 0.7) < 1e-12
+    assert abs(e.persistent_affect["user"].trust - 0.5) < 1e-12
+    assert e.persistent_affect["user"].admiration > 0.0
+
+
+def test_same_cause_different_appraisal_channels_can_coexist():
+    e = AffectiveEngine()
+    e.apply_impulse(EmotionalImpulse("distress", 0.9, "event-1", "user", "goal"))
+    e.apply_impulse(EmotionalImpulse("reproach", 0.8, "event-1", "user", "standard"))
+    assert abs(e.state.emotions["distress"] - 0.9) < 1e-12
+    assert abs(e.state.emotions["reproach"] - 0.8) < 1e-12
+
+
 def test_reappraisal_below_threshold_extinguishes_prior_cause():
     e = AffectiveEngine({"fear": EmotionDisposition(threshold=0.3, half_life=10.0)})
     e.apply_impulse(EmotionalImpulse("fear", 0.8, "event", "user"))

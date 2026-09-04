@@ -24,6 +24,7 @@ class PersistentAffect: trust:float=.5;attachment:float=0.;affection:float=0.;at
 class _Contribution: emotion_type:str;intensity_at_t0:float;tick_t0:float;threshold:float;decay_multiplier:float;source_potential:float
 class AffectiveEngine:
  POSITIVE={"joy","hope","relief","satisfaction","admiration","pride","gratitude","gratification","love","liking","happy-for","gloating","affection"};NEGATIVE={"distress","fear","fears-confirmed","disappointment","anger","reproach","shame","remorse","resentment","hate","disliking","pity","aversion"}
+ REPAIR_TRUST={"gratitude","relief","satisfaction","love"};PERSISTENT_EFFECTS={"joy","relief","satisfaction","love","liking","gratitude","happy-for","affection","admiration","pride","gratification","anger","reproach","resentment","disappointment","fears-confirmed","hate","disliking","aversion"}
  ALMA_PAD={"admiration":(.5,.3,-.2),"anger":(-.51,.59,.25),"disliking":(-.4,.2,.1),"disappointment":(-.3,.1,-.4),"distress":(-.4,-.2,-.5),"fear":(-.64,.60,-.43),"fears-confirmed":(-.5,-.3,-.7),"gloating":(.3,-.3,-.1),"gratification":(.6,.5,.4),"gratitude":(.4,.2,-.3),"happy-for":(.4,.2,.2),"hate":(-.6,.6,.3),"hope":(.2,.2,-.1),"joy":(.4,.2,.1),"liking":(.4,.16,-.24),"love":(.3,.1,.2),"pity":(-.4,-.2,-.5),"pride":(.4,.3,.3),"relief":(.2,-.3,.4),"remorse":(-.3,.1,-.6),"reproach":(-.3,-.1,.4),"resentment":(-.2,-.3,-.2),"satisfaction":(.3,-.2,.4),"shame":(-.3,.1,-.6)}
  def __init__(self,dispositions=None,profile=None,config=None):self.state=EmotionState();self.dispositions=dispositions or {};self.profile=profile or AffectiveProfile();self.config=config or AffectiveConfig();self.persistent_affect={};self._contributions={};self._persistent_ledger={};self._time=0.;self._mood_at_t0=0.;self._mood_tick_t0=0.
  def disposition(self,e):return self.dispositions.get(e,EmotionDisposition())
@@ -33,6 +34,7 @@ class AffectiveEngine:
   c=self._contributions.get((cause_id,appraisal_channel,target_id));return None if c is None else(c.emotion_type,self._decayed_contribution(c,self._time))
  def apply_impulse(self,i):
   slot=(i.cause_id,i.appraisal_channel,i.target_id);prev=self._contributions.get(slot);pled=self._persistent_ledger.get(slot);raw=self._profiled_intensity(i.emotion_type,i.intensity)
+  if prev and prev.emotion_type==i.emotion_type and math.isclose(prev.source_potential,raw,abs_tol=1e-12):return False
   if pled and pled[0]==i.emotion_type and math.isclose(pled[2],raw,abs_tol=1e-12):return False
   if prev:del self._contributions[slot];self._recompute_emotion(prev.emotion_type)
   if pled:del self._persistent_ledger[slot];self._recompute_persistent(i.target_id)
@@ -41,7 +43,7 @@ class AffectiveEngine:
   pot=self._determine_potential(i.emotion_type,raw)
   if pot<=th:self._update_dimensions();return prev is not None or pled is not None
   intensity=self._clamp(pot-th);self._contributions[slot]=_Contribution(i.emotion_type,intensity,self._time,th,self._fatima_decay_multiplier(d),raw);self._recompute_emotion(i.emotion_type)
-  if i.target_id:self._persistent_ledger[slot]=(i.emotion_type,intensity,raw);self._recompute_persistent(i.target_id)
+  if i.target_id and i.emotion_type in self.PERSISTENT_EFFECTS:self._persistent_ledger[slot]=(i.emotion_type,intensity,raw);self._recompute_persistent(i.target_id)
   if prev is None and pled is None and self._influences_mood(i.emotion_type):self._update_mood_from_new_emotion(i.emotion_type,intensity)
   self._update_dimensions();return True
  def decay(self,dt):
@@ -57,18 +59,20 @@ class AffectiveEngine:
   slot=(cause_id,appraisal_channel,target_id);c=self._contributions.get(slot)
   if c is None:return False
   cur=self._decayed_contribution(c,self._time);p=self._clamp(potential);a=(cur+c.threshold)*10.;b=p*10.;pivot=max(a,b);r=min(1.,(pivot+math.log(math.exp(a-pivot)+math.exp(b-pivot)))/10.);ni=self._clamp(r-c.threshold);self._contributions[slot]=_Contribution(c.emotion_type,ni,self._time,c.threshold,c.decay_multiplier,max(c.source_potential,p))
-  if target_id:self._persistent_ledger[slot]=(c.emotion_type,ni,max(c.source_potential,p));self._recompute_persistent(target_id)
+  if target_id and c.emotion_type in self.PERSISTENT_EFFECTS:self._persistent_ledger[slot]=(c.emotion_type,ni,max(c.source_potential,p));self._recompute_persistent(target_id)
   self._recompute_emotion(c.emotion_type);self._update_dimensions();return True
  def _recompute_persistent(self,entity):
   if not entity:return
-  raw={"trust":.5,"attachment":0.,"affection":0.,"attraction":0.,"resentment":0.,"respect":.5,"admiration":0.,"aversion":0.};step=max(0.,self.profile.persistent_step)
+  raw={"trust":.5,"attachment":0.,"affection":0.,"attraction":0.,"resentment":0.,"respect":.5,"admiration":0.,"aversion":0.};step=max(0.,self.profile.persistent_step);seen=False
   for (cause,ch,target),(e,intensity,source) in self._persistent_ledger.items():
    if target!=entity:continue
-   s=intensity*step
+   seen=True;s=intensity*step
    if e in {"joy","relief","satisfaction","love","liking","gratitude","happy-for","affection"}:raw["affection"]+=s;raw["attachment"]+=s*.5
    if e in {"admiration","pride","gratitude","gratification"}:raw["admiration"]+=s;raw["respect"]+=s*.5
    if e in {"anger","reproach","resentment","disappointment","fears-confirmed"}:raw["resentment"]+=s;raw["trust"]-=s
+   if e in self.REPAIR_TRUST:raw["trust"]+=s*.5;raw["resentment"]-=s*.4
    if e in {"hate","disliking","aversion"}:raw["aversion"]+=s
+  if not seen:self.persistent_affect.pop(entity,None);return
   self.persistent_affect[entity]=PersistentAffect(**{k:self._clamp(v) for k,v in raw.items()})
  def _fatima_decay_multiplier(self,d):return self.config.emotional_half_life_decay_time/max(.01,d.half_life*max(.01,self.profile.recovery_scale))
  def _decayed_contribution(self,c,t):return c.intensity_at_t0*math.exp(math.log(self.config.half_life_decay_constant)/max(.01,self.config.emotional_half_life_decay_time)*c.decay_multiplier*max(0.,t-c.tick_t0))

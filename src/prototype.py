@@ -69,8 +69,6 @@ class MatrixAffectivePrototype:
         novelty = self._clamp(s.novelty)
         habituation = self._habituation_factor(s.habituation_key)
 
-        # Cognitiv/Affect-Infusion style mood bias: only ambiguous appraisals are
-        # biased. Explicit semantic evidence (ambiguity=0) is never overridden.
         if ambiguity > 0.0 and self.affect.state.mood_valence != 0.0:
             bias = (
                 self.affect.state.mood_valence
@@ -81,15 +79,24 @@ class MatrixAffectivePrototype:
 
         impulses: list[EmotionalImpulse] = []
         modulation = novelty * habituation
+        goal_target = s.actor_id or s.target_id
 
         if relevance > 0.0 and congruence != 0.0 and modulation > 0.0:
             intensity = min(1.0, relevance * abs(congruence) * modulation)
-            if congruence > 0:
-                emotion = "joy" if s.confirmed else "hope"
+            previous_goal = self.affect.contribution_for(s.id, "goal", goal_target)
+            previous_type = None if previous_goal is None else previous_goal[0]
+
+            if not s.confirmed:
+                emotion = "hope" if congruence > 0 else "fear"
+            elif previous_type == "hope" and congruence < 0:
+                emotion = "disappointment"
+            elif previous_type == "fear" and congruence > 0:
+                emotion = "relief"
             else:
-                emotion = "distress" if s.confirmed else "fear"
+                emotion = "joy" if congruence > 0 else "distress"
+
             impulses.append(EmotionalImpulse(
-                emotion, intensity, s.id, s.actor_id or s.target_id, "goal"
+                emotion, intensity, s.id, goal_target, "goal"
             ))
 
         if s.category == "action" and s.actor_id and s.standard_compliance is not None:
@@ -137,7 +144,6 @@ class MatrixAffectivePrototype:
             return 1.0
         count = self._habituation_counts.get(key, 0)
         self._habituation_counts[key] = count + 1
-        # Standard exponential habituation curve with a non-zero floor.
         return max(0.2, math.exp(-0.35 * count))
 
     @staticmethod

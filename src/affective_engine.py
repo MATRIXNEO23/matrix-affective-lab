@@ -39,14 +39,6 @@ class PersistentAffect:
 
 
 class AffectiveEngine:
-    """Lab prototype combining selected FAtiMA and Cognitiv mechanics.
-
-    FAtiMA-inspired: per-emotion disposition, cause-aware reappraisal.
-    Cognitiv-inspired: saturating integration, half-life decay, slow mood.
-    Matrix-owned: entity-scoped persistent affect and hard separation from
-    canonical relationship state.
-    """
-
     POSITIVE = {"joy", "hope", "relief", "admiration", "pride", "affection", "liking"}
     NEGATIVE = {"distress", "fear", "anger", "reproach", "shame", "resentment", "aversion", "disliking"}
     HIGH_AROUSAL = {"anger", "fear", "joy", "distress", "surprise"}
@@ -55,7 +47,8 @@ class AffectiveEngine:
         self.state = EmotionState()
         self.dispositions = dispositions or {}
         self.persistent_affect: Dict[str, PersistentAffect] = {}
-        self._cause_index: Dict[tuple[str, str, Optional[str]], float] = {}
+        # Exact per-cause contributions make reappraisal and decay composable.
+        self._contributions: Dict[tuple[str, str, Optional[str]], float] = {}
 
     def disposition(self, emotion_type: str) -> EmotionDisposition:
         return self.dispositions.get(emotion_type, EmotionDisposition())
@@ -65,38 +58,46 @@ class AffectiveEngine:
         disp = self.disposition(impulse.emotion_type)
         if intensity <= disp.threshold:
             return False
-
         key = (impulse.cause_id, impulse.emotion_type, impulse.target_id)
-        previous_from_cause = self._cause_index.get(key, 0.0)
-        current = self.state.emotions.get(impulse.emotion_type, 0.0)
-
-        # Reappraisal replaces the contribution from the same cause instead of
-        # blindly stacking it again.
-        base = max(0.0, current - previous_from_cause)
-        integrated = base + intensity * (1.0 - base)
-        self.state.emotions[impulse.emotion_type] = min(1.0, integrated)
-        self._cause_index[key] = intensity
-
+        previous = self._contributions.get(key, 0.0)
+        self._contributions[key] = intensity
+        self._recompute_emotion(impulse.emotion_type)
         self._update_mood()
         if impulse.target_id:
-            self._update_persistent_affect(impulse.target_id, impulse.emotion_type, intensity)
+            # Reappraisal changes persistent affect only by the changed evidence.
+            self._update_persistent_affect(impulse.target_id, impulse.emotion_type, intensity - previous)
         return True
 
     def decay(self, delta_time: float) -> None:
         if delta_time <= 0:
             return
+        touched = set()
         dead = []
-        for emotion_type, intensity in self.state.emotions.items():
+        for key, intensity in list(self._contributions.items()):
+            _, emotion_type, _ = key
             half_life = max(0.01, self.disposition(emotion_type).half_life)
-            lam = math.log(2.0) / half_life
-            value = intensity * math.exp(-lam * delta_time)
+            value = intensity * math.exp(-(math.log(2.0) / half_life) * delta_time)
+            touched.add(emotion_type)
             if value < 0.01:
-                dead.append(emotion_type)
+                dead.append(key)
             else:
-                self.state.emotions[emotion_type] = value
-        for emotion_type in dead:
-            del self.state.emotions[emotion_type]
+                self._contributions[key] = value
+        for key in dead:
+            del self._contributions[key]
+        for emotion_type in touched:
+            self._recompute_emotion(emotion_type)
         self._update_mood()
+
+    def _recompute_emotion(self, emotion_type: str) -> None:
+        vals = [v for (_, et, _), v in self._contributions.items() if et == emotion_type]
+        if not vals:
+            self.state.emotions.pop(emotion_type, None)
+            return
+        # Saturating independent-cause aggregation: 1 - product(1-i).
+        remaining = 1.0
+        for value in vals:
+            remaining *= 1.0 - max(0.0, min(1.0, value))
+        self.state.emotions[emotion_type] = 1.0 - remaining
 
     def _update_mood(self) -> None:
         pos = sum(self.state.emotions.get(e, 0.0) for e in self.POSITIVE)
@@ -104,37 +105,28 @@ class AffectiveEngine:
         total = pos + neg
         valence = 0.0 if total == 0 else (pos - neg) / total
         total_intensity = sum(self.state.emotions.values())
-        arousal = 0.0 if total_intensity == 0 else min(
-            1.0,
-            sum(self.state.emotions.get(e, 0.0) for e in self.HIGH_AROUSAL) / total_intensity,
-        )
-        # Mood deliberately moves slower than immediate emotion.
+        arousal = 0.0 if total_intensity == 0 else min(1.0, sum(self.state.emotions.get(e, 0.0) for e in self.HIGH_AROUSAL) / total_intensity)
         self.state.mood_valence += (valence - self.state.mood_valence) * 0.10
         self.state.mood_arousal += (arousal - self.state.mood_arousal) * 0.05
 
-    def _update_persistent_affect(self, entity_id: str, emotion_type: str, intensity: float) -> None:
+    @staticmethod
+    def _clamp(value: float) -> float:
+        return max(0.0, min(1.0, value))
+
+    def _update_persistent_affect(self, entity_id: str, emotion_type: str, intensity_delta: float) -> None:
         affect = self.persistent_affect.setdefault(entity_id, PersistentAffect())
-        # Deliberately slow deltas: persistent affect must move much more slowly
-        # than immediate emotion. Mapping is provisional and lab-only.
-        step = intensity * 0.05
+        step = intensity_delta * 0.05
         if emotion_type in {"joy", "relief", "affection", "liking"}:
-            affect.affection = min(1.0, affect.affection + step)
-            affect.attachment = min(1.0, affect.attachment + step * 0.5)
+            affect.affection = self._clamp(affect.affection + step)
+            affect.attachment = self._clamp(affect.attachment + step * 0.5)
         if emotion_type in {"admiration", "pride"}:
-            affect.admiration = min(1.0, affect.admiration + step)
-            affect.respect = min(1.0, affect.respect + step * 0.5)
+            affect.admiration = self._clamp(affect.admiration + step)
+            affect.respect = self._clamp(affect.respect + step * 0.5)
         if emotion_type in {"anger", "reproach", "resentment"}:
-            affect.resentment = min(1.0, affect.resentment + step)
-            affect.trust = max(0.0, affect.trust - step)
+            affect.resentment = self._clamp(affect.resentment + step)
+            affect.trust = self._clamp(affect.trust - step)
         if emotion_type in {"aversion", "disliking"}:
-            affect.aversion = min(1.0, affect.aversion + step)
+            affect.aversion = self._clamp(affect.aversion + step)
 
     def snapshot(self) -> dict:
-        return {
-            "emotions": dict(self.state.emotions),
-            "mood_valence": self.state.mood_valence,
-            "mood_arousal": self.state.mood_arousal,
-            "persistent_affect": {
-                entity: vars(affect).copy() for entity, affect in self.persistent_affect.items()
-            },
-        }
+        return {"emotions": dict(self.state.emotions), "mood_valence": self.state.mood_valence, "mood_arousal": self.state.mood_arousal, "persistent_affect": {e: vars(a).copy() for e, a in self.persistent_affect.items()}}
